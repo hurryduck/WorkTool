@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+        <title>work tool</title>
+
+        <style>
+            .view {
+                display: none;
+            }
+
+            .view.display {
+                display: block;
+            }
+        </style>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jsSHA/2.4.2/sha.js"></script>
+    </head>
+
+    <body>
+        <header>
+            <h1>Work Tool</h1>
+        </header>
+
+        <main id="app">
+            <section id="login_view" class="view">
+                <h2>Login</h2>
+
+                <form id="login_form">
+                    <label>
+                        username:
+                        <input type="text" name="username" required />
+                    </label>
+                    <label>
+                        password:
+                        <input type="password" name="password" required />
+                    </label>
+                    <button type="submit">login</button>
+                </form>
+            </section>
+        </main>
+
+        <footer></footer>
+
+        <script>
+            const utils = {};
+
+            class Database {
+                static NAME = 'work_tool_db';
+                static VERSION = 1;
+                static STORES = {
+                    USER: { keyPath: 'seq' },
+                };
+
+                constructor() {
+                    this.database = null;
+                }
+
+                async init() {
+                    await this.open();
+                }
+
+                open() {
+                    const promise = new Promise((resolve, reject) => {
+                        const database = indexedDB.open(Database.NAME, Database.VERSION);
+
+                        database.onupgradeneeded = (event) => {
+                            const db = event.target.result;
+
+                            for (let storeName of Object.keys(Database.STORES)) {
+                                const keyPath = this.stores[storeName];
+
+                                if (!db.objectStoreNames.contains(storeName)) {
+                                    db.createObjectStore(storeName, keyPath);
+                                }
+                            }
+                        };
+
+                        database.onsuccess = (event) => {
+                            this.database = event.target.result;
+                            resolve(event.target.result);
+                        };
+
+                        database.onerror = (event) => {
+                            reject(event.target.errorCode);
+                        };
+                    });
+
+                    return promise;
+                }
+            }
+
+            class EntityBase {
+                constructor() {}
+            }
+
+            class User extends EntityBase {
+                constructor(username, password) {
+                    this.username = username;
+                    this.password = password;
+                }
+
+                getUsername() {
+                    return this.username;
+                }
+
+                getPassword() {
+                    return this.password;
+                }
+            }
+
+            class ServiceManager {
+                static SERVICES = {
+                    AUTHENTICATION: 'authentication',
+                };
+
+                constructor() {
+                    this.services = {};
+
+                    this.services[ServiceManager.SERVICES.AUTHENTICATION] = new Authentication({ root: this });
+                }
+
+                get(serviceName) {
+                    if (!Object.values(ServiceManager.SERVICES).includes(serviceName)) {
+                        throw new Error('invalid serviceName');
+                    }
+
+                    return this.services[serviceName];
+                }
+            }
+
+            class IService {
+                constructor() {
+                    if (new.target === IService) {
+                        throw new Error('abstract');
+                    }
+                }
+
+                init() {
+                    throw new Error('init required');
+                }
+            }
+
+            class Authentication extends IService {
+                constructor() {
+                    super();
+                }
+
+                get() {
+                    return false;
+                }
+
+                set(username, password) {
+                    const user = new User(username, password);
+
+                    return true;
+                }
+            }
+
+            class ViewManager {
+                constructor(dependency) {
+                    const { state, serviceManager } = dependency ?? {};
+
+                    if (state == null || serviceManager == null) {
+                        throw new Error('invalid dependency');
+                    }
+
+                    this.views = {};
+
+                    this.views.loginView = new LoginView({ state, serviceManager, rootUpdate: this.update.bind(this) });
+                }
+
+                render() {
+                    for (const view of Object.values(this.views)) {
+                        view.render();
+                    }
+                }
+
+                update() {}
+            }
+
+            class IView {
+                constructor(dependency) {
+                    const { state, serviceManager, rootUpdate } = dependency ?? {};
+
+                    if (state == null || serviceManager == null || rootUpdate == null) {
+                        throw new Error('invalid dependency');
+                    }
+
+                    this.state = state;
+                    this.serviceManager = serviceManager;
+                    this.rootUpdate = rootUpdate;
+                }
+
+                render() {
+                    throw new Error('render required');
+                }
+            }
+
+            class LoginView extends IView {
+                constructor(dependency) {
+                    super(dependency);
+
+                    this.authn = this.serviceManager.get(ServiceManager.SERVICES.AUTHENTICATION);
+
+                    this.rootEl = document.querySelector('#login_view');
+                    this.loginFormEl = document.querySelector('#login_form');
+
+                    this.loginFormEl.addEventListener('submit', this.handleLogin.bind(this));
+                }
+
+                render() {
+                    if (this.state.isLogin) {
+                        this.rootEl.classList.add('display');
+                    }
+                }
+
+                handleLogin(event) {
+                    event.preventDefault();
+
+                    const formData = new FormData(e.target);
+
+                    const username = formData.get('username');
+                    const password = formData.get('password');
+
+                    const result = this.authn.set(username, password);
+
+                    if (result) {
+                        this.state.isLogin = true;
+
+                        this.rootUpdate();
+                    } else {
+                        alert('login failed');
+                    }
+                }
+            }
+
+            class App {
+                constructor() {
+                    this.state = {};
+
+                    this.database = new Database();
+                    this.serviceManager = new ServiceManager({ database: this.database });
+                    this.viewManager = new ViewManager({ state: this.state, serviceManager: this.serviceManager });
+                }
+
+                async run() {
+                    await this.init();
+
+                    this.viewManager.render();
+                }
+
+                async init() {
+                    await this.database.init();
+                    this.initState();
+                }
+
+                initState() {
+                    const authn = this.serviceManager.get(ServiceManager.SERVICES.AUTHENTICATION);
+
+                    this.state.isLogin = authn.get();
+                }
+            }
+
+            utils.cookie = {};
+
+            utils.cookie.get = (name) => {
+                if (typeof name !== 'string' || name.trim() === '') {
+                    return null;
+                }
+
+                const encodedName = encodeURIComponent(name);
+                const cookie = `; ${document.cookie}`;
+                const value = cookie.split(`; ${encodedName}=`);
+
+                if (value.length === 2) {
+                    return decodeURIComponent(value[1].split(';')[0]);
+                }
+
+                return null;
+            };
+
+            // expires: seconds
+            utils.cookie.set = (name, value, expires) => {
+                if (typeof name !== 'string' || name.trim() === '') {
+                    return;
+                }
+
+                if (value === null || value === undefined) {
+                    return;
+                }
+
+                if (typeof expires !== 'number' || expires < 0) {
+                    return;
+                }
+
+                const encodedName = encodeURIComponent(name);
+                const encodedValue = encodeURIComponent(String(value));
+
+                document.cookie = `${encodedName}=${encodedValue}; max-age=${expires}; path=/; Secure; SameSite=None`;
+            };
+
+            const app = new App();
+
+            app.run();
+        </script>
+    </body>
+</html>
