@@ -53,8 +53,12 @@
                 static NAME = 'work_tool_db';
                 static VERSION = 1;
                 static STORES = {
-                    USER: { keyPath: 'id' },
-                    SESSION: { keyPath: 'id' },
+                    USER: 'user',
+                    SESSION: 'session',
+                };
+                static STORE_CONFIG = {
+                    [this.STORES.USER]: { keyPath: 'id' },
+                    [this.STORES.SESSION]: { keyPath: 'id' },
                 };
 
                 constructor() {
@@ -73,9 +77,9 @@
                         request.onupgradeneeded = (event) => {
                             const db = event.target.result;
 
-                            for (const [storeName, options] of Object.entries(Database.STORES)) {
+                            for (const storeName of Object.values(Database.STORES)) {
                                 if (!db.objectStoreNames.contains(storeName)) {
-                                    db.createObjectStore(storeName, options);
+                                    db.createObjectStore(storeName, Database.STORE_CONFIG[storeName]);
                                 }
                             }
                         };
@@ -244,9 +248,13 @@
 
                     this.database = database;
 
-                    this.userService = new UserService();
+                    this.userService = new UserService({ database: this.database });
                     this.sessionService = new SessionService({ database: this.database, userService: this.userService });
-                    this.authenticationService = new AuthenticationService({ database: this.database, userService: this.userService, sessionService: this.sessionService });
+                    this.authenticationService = new AuthenticationService({
+                        database: this.database,
+                        userService: this.userService,
+                        sessionService: this.sessionService,
+                    });
 
                     this.services = {};
                     this.services[ServiceManager.SERVICES.USER] = this.userService;
@@ -275,13 +283,30 @@
             }
 
             class UserService extends IService {
-                constructor() {
+                constructor(dependency) {
                     super();
 
+                    const { database } = dependency ?? {};
+
+                    this.database = database;
                     this.hashAdapter = new JsShaAdapter();
                 }
 
-                isUser(username, password) {}
+                async register(username, password) {
+                    const userId = this._createUserId(username, password);
+                    const newUser = new UserEntity(userId, { username });
+
+                    const result = await this.database.update(Database.STORES.USER, newUser);
+
+                    return newUser;
+                }
+
+                async isUser(username, password) {
+                    const userId = this._createUserId(username, password);
+                    const user = await this.database.select(Database.STORES.USER, userId);
+
+                    return Boolean(user);
+                }
 
                 _createUserId(username, password) {
                     const text = `${username}:${password}`;
@@ -310,7 +335,7 @@
                         return;
                     }
 
-                    const stored = this.database.select(Database.STORES.SESSION, sessionId);
+                    const stored = await this.database.select(Database.STORES.SESSION, sessionId);
 
                     this.session = new SessionEntity(sessionId, stored);
                 }
@@ -345,13 +370,9 @@
                     const isUser = this.userService.isUser(username, password);
 
                     if (!isUser) {
-                        this.register(username, password);
+                        this.userService.register(username, password);
                     }
 
-
-                }
-
-                register(username, password) {
                     return true;
                 }
             }
@@ -421,7 +442,7 @@
                 _handleLogin(event) {
                     event.preventDefault();
 
-                    const formData = new FormData(e.target);
+                    const formData = new FormData(event.target);
 
                     const username = formData.get('username');
                     const password = formData.get('password');
@@ -438,10 +459,23 @@
                 }
             }
 
+            class DependencyManager {
+                constructor() {
+                    this._registry = new Map();
+                }
+
+                register(key, instance) {
+                    this._registry.set(key, instance);
+                }
+
+                get(key) {
+                    return this._registry.get(key);
+                }
+            }
+
             class App {
                 constructor() {
-                    this.state = {};
-
+                    this.deps = new DependencyManager();
                     this.database = new Database();
                     this.serviceManager = new ServiceManager({ database: this.database });
                     this.viewManager = new ViewManager({ state: this.state, serviceManager: this.serviceManager });
@@ -450,7 +484,21 @@
                 async run() {
                     await this._init();
 
+                    await this._setup();
+
                     this.viewManager.render();
+                }
+
+                async _setup() {}
+
+                async _setupInfrastructure() {
+                    const db = new Database();
+                    await db.init();
+
+                    this.deps.register('config', { SESSION_KEY: 'wt_id', EXPIRES: 1800 });
+                    this.deps.register('db', db);
+                    this.deps.register('crypto', new JsShaAdapter());
+                    this.deps.register('storage', new CookieAdapter());
                 }
 
                 async _init() {
@@ -465,10 +513,6 @@
                     this.state.isLogin = authenticationService.isLogin();
                 }
             }
-
-            config.SESSION = {
-                EXPIRES: 30,
-            };
 
             utils.cookie = {};
 
@@ -537,6 +581,43 @@
 
                 return hex;
             };
+
+            class CookieAdapter {
+                get(name) {
+                    if (typeof name !== 'string' || name.trim() === '') {
+                        return null;
+                    }
+
+                    const encodedName = encodeURIComponent(name);
+                    const cookie = `; ${document.cookie}`;
+                    const value = cookie.split(`; ${encodedName}=`);
+
+                    if (value.length === 2) {
+                        return decodeURIComponent(value[1].split(';')[0]);
+                    }
+
+                    return null;
+                }
+
+                set(name, value, expires) {
+                    if (typeof name !== 'string' || name.trim() === '') {
+                        return;
+                    }
+
+                    if (value === null || value === undefined) {
+                        return;
+                    }
+
+                    if (typeof expires !== 'number' || expires < 0) {
+                        return;
+                    }
+
+                    const encodedName = encodeURIComponent(name);
+                    const encodedValue = encodeURIComponent(String(value));
+
+                    document.cookie = `${encodedName}=${encodedValue}; max-age=${expires}; path=/; Secure; SameSite=None`;
+                }
+            }
 
             class JsShaAdapter {
                 sha256Hex(text) {
